@@ -12,6 +12,15 @@
 
 using namespace std;
 
+// Wrap the exceedingly tedious error handling style C requires and throw an exception.
+// Usage: WinFoo(...args) -> TRY_OR_THROW(WinFoo, ...args)
+#define TRY_OR_THROW(function, ...) {\
+    auto return_code = function(__VA_ARGS__); \
+    if (return_code != ERROR_SUCCESS) { \
+        throw new wifi_survey::wlan_exception(#function, return_code); \
+    } \
+}
+
 namespace {
     VOID WINAPI wlan_session_notify_callback(PWLAN_NOTIFICATION_DATA data, PVOID context) {
         auto scan_done = (timed_mutex*)context;
@@ -21,27 +30,33 @@ namespace {
         }
     }
 
+    template<typename T>
+    class wlan_scope_guard {
+        unique_ptr<T, void(*)(T*)> ptr;
+
+    public:
+        wlan_scope_guard(T* t) : ptr(t, [](T* t2) { WlanFreeMemory(t2); }) { }
+    };
+
+
     class wlan_session {
     public:
         // Initializes a new "session" of dealing with the windows wireless API.
         wlan_session() {
             DWORD negotiatedVersion;
-            auto ret = WlanOpenHandle(2, nullptr, &negotiatedVersion, &this->handle);
-            if (ret != ERROR_SUCCESS) {
-                throw new wifi_survey::wlan_exception("WlanOpenHandle", ret);
-            }
+            TRY_OR_THROW(WlanOpenHandle, 2, nullptr, &negotiatedVersion, &this->handle);
         }
 
         ~wlan_session() {
+            // Cannot throw exceptions in a dtor.
             WlanCloseHandle(this->handle, nullptr);
         }
 
         vector<WLAN_INTERFACE_INFO> get_interfaces() const {
             PWLAN_INTERFACE_INFO_LIST interfaces;
-            auto ret = WlanEnumInterfaces(this->handle, nullptr, &interfaces);
-            if (ret != ERROR_SUCCESS) {
-                throw new wifi_survey::wlan_exception("WlanEnumInterfaces", ret);
-            }
+            TRY_OR_THROW(WlanEnumInterfaces, this->handle, nullptr, &interfaces);
+            
+            wlan_scope_guard<WLAN_INTERFACE_INFO_LIST> interfaces_guard(interfaces);
 
             vector<WLAN_INTERFACE_INFO> out;
 
@@ -52,7 +67,6 @@ namespace {
                 }
             }
 
-            WlanFreeMemory(interfaces);
             return out;
         }
 
@@ -61,20 +75,38 @@ namespace {
             scan_done.lock();
 
             // register for "scan complete" notifications, then request a scan
-            WlanRegisterNotification(this->handle, WLAN_NOTIFICATION_SOURCE_ACM, FALSE, wlan_session_notify_callback, &scan_done, nullptr, nullptr);
-            WlanScan(this->handle, &interfaceId, nullptr, nullptr, nullptr);
+            TRY_OR_THROW(
+                WlanRegisterNotification,
+                this->handle,
+                WLAN_NOTIFICATION_SOURCE_ACM,
+                FALSE,
+                wlan_session_notify_callback,
+                &scan_done, 
+                nullptr,
+                nullptr);
 
-            // callback will unlock the mutex
+            TRY_OR_THROW(WlanScan, this->handle, &interfaceId, nullptr, nullptr, nullptr);
+
+            // callback will unlock the mutex.
+            // Scan is required to complete in 4s, per spec, and I don't feel like trying to get fancier.
             if (!scan_done.try_lock_for(5s)) {
                 throw new runtime_error("Scan for wireless networks failed to complete in 5s.");
             }
 
             // unregister notifications
-            WlanRegisterNotification(this->handle, WLAN_NOTIFICATION_SOURCE_NONE, FALSE, nullptr, nullptr, nullptr, nullptr);
+            TRY_OR_THROW(
+                WlanRegisterNotification, 
+                this->handle, 
+                WLAN_NOTIFICATION_SOURCE_NONE, 
+                FALSE, 
+                nullptr, 
+                nullptr, 
+                nullptr, 
+                nullptr);
 
             PWLAN_BSS_LIST bss_list;
-
-            auto ret = WlanGetNetworkBssList(
+            TRY_OR_THROW(
+                WlanGetNetworkBssList,
                 this->handle,
                 &interfaceId,
                 nullptr,
@@ -82,10 +114,7 @@ namespace {
                 FALSE,
                 nullptr,
                 &bss_list);
-
-            if (ret != ERROR_SUCCESS) {
-                throw new wifi_survey::wlan_exception("WlanGetNetworkBssList", ret);
-            }
+            wlan_scope_guard<WLAN_BSS_LIST> bss_list_guard(bss_list);
 
             vector<wifi_survey::network> result;
             for (DWORD i = 0; i < bss_list->dwNumberOfItems; ++i) {
@@ -96,7 +125,6 @@ namespace {
                 result.push_back(n);
             }
 
-            WlanFreeMemory(bss_list);
             return result;
         }
 
