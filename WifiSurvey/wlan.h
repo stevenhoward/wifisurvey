@@ -20,4 +20,22 @@ namespace wifi_survey {
     };
 
     std::vector<network> enumerate_networks();
+
+    struct frequency_channel_map {
+        std::string band;
+        int channel;
+        unsigned long frequency_mhz;
+
+        frequency_channel_map(int channel, unsigned long frequency_mhz)
+            : channel(channel), frequency_mhz(frequency_mhz) {
+            if (frequency_mhz > 5000) {
+                this->band = "5GHz";
+            }
+            else {
+                this->band = "2.4GHz";
+            }
+        }
+    };
+
+    frequency_channel_map get_frequency_channel_map(unsigned long frequency_khz);
 }
