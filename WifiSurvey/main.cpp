@@ -6,6 +6,7 @@
 
 using namespace std;
 
+// Convenience class to make table.add({ }) work.
 struct table_row {
     table_row(initializer_list<string> contents_) : contents(contents_) { }
     vector<string> contents;
@@ -16,6 +17,7 @@ struct table {
         contents.push_back(headings);
     }
 
+    // ex.: table.add({ "foo", "bar", "baz" })
     void add(table_row row) {
         contents.push_back(row.contents);
     }
@@ -47,6 +49,8 @@ ostream& operator<<(ostream& out, const table& table) {
     return out;
 }
 
+// Get the list of available networks, group them by frequency, strength, and network name, then print them
+// in a tabular format.
 void run() {
     auto networks = wifi_survey::enumerate_networks();
 
