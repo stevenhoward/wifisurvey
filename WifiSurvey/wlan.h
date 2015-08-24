@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <guiddef.h>
+
 namespace wifi_survey {
     class wlan_exception : std::runtime_error {
     public:
@@ -19,7 +21,28 @@ namespace wifi_survey {
         long strength;
     };
 
-    std::vector<network> enumerate_networks();
+    struct adapter {
+        std::string name;
+
+        // type opaque to the caller, just pass it back when you pick one
+        GUID GUID;
+    };
+
+    class wlan_session {
+    public:
+        wlan_session();
+
+        ~wlan_session();
+
+        std::vector<network> enumerate_networks(adapter adapter) const;
+
+        std::vector<adapter> enumerate_adapters() const;
+
+    private:
+        void scan_networks_blocking(adapter adapter) const;
+
+        void* handle;
+    };
 
     struct frequency_channel_map {
         std::string band;

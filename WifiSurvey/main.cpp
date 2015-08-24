@@ -12,6 +12,7 @@ struct table_row {
     vector<string> contents;
 };
 
+// Tabular output and whatnot
 struct table {
     table(initializer_list<string> headings) {
         contents.push_back(headings);
@@ -27,6 +28,7 @@ private:
     friend ostream& operator<<(ostream& out, const table& table);
 };
 
+// Makes the table go cout << table and work its glorious magic
 ostream& operator<<(ostream& out, const table& table) {
     vector<size_t> column_lengths;
     for (size_t i = 0; i < table.contents[0].size(); ++i) {
@@ -40,7 +42,7 @@ ostream& operator<<(ostream& out, const table& table) {
 
     for (const auto& row : table.contents) {
         for (size_t i = 0; i < column_lengths.size(); ++i) {
-            out << left  << setw(column_lengths[i] + 1) << row[i];
+            out << left  << setw(column_lengths[i] + 2) << row[i];
         }
 
         out << '\n';
@@ -52,7 +54,15 @@ ostream& operator<<(ostream& out, const table& table) {
 // Get the list of available networks, group them by frequency, strength, and network name, then print them
 // in a tabular format.
 void run() {
-    auto networks = wifi_survey::enumerate_networks();
+    wifi_survey::wlan_session session;
+    auto adapters = session.enumerate_adapters();
+    cout << "Adapters (TODO: don't just pick the first):\n";
+    for (auto adapter : adapters) {
+        cout << adapter.name << '\n';
+    }
+
+    auto chosen_adapter = adapters.front();
+    auto networks = session.enumerate_networks(chosen_adapter);
 
     sort(networks.begin(), networks.end(), [](const wifi_survey::network& a, const wifi_survey::network& b) {
         if (a.frequency == b.frequency) {
@@ -71,7 +81,7 @@ void run() {
     unsigned long last_freq = 0;
     for (const auto& network : networks) {
         auto map = wifi_survey::get_frequency_channel_map(network.frequency);
-        out.add({ map.band, to_string(map.channel), to_string(network.strength), network.name });
+        out.add({ map.band, to_string(map.channel), to_string(network.strength) + "dBm", network.name });
     }
 
     cout << out;

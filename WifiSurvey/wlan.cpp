@@ -22,116 +22,7 @@ using namespace std;
 }
 
 namespace {
-    VOID WINAPI wlan_session_notify_callback(PWLAN_NOTIFICATION_DATA data, PVOID context) {
-        auto scan_done = (timed_mutex*)context;
-        if (data->NotificationSource == WLAN_NOTIFICATION_SOURCE_ACM &&
-            data->NotificationCode == wlan_notification_acm_scan_complete) {
-            scan_done->unlock();
-        }
-    }
-
-    template<typename T>
-    class wlan_scope_guard {
-        unique_ptr<T, void(*)(T*)> ptr;
-
-    public:
-        wlan_scope_guard(T* t) : ptr(t, [](T* t2) { WlanFreeMemory(t2); }) { }
-    };
-
-
-    class wlan_session {
-    public:
-        // Initializes a new "session" of dealing with the windows wireless API.
-        wlan_session() {
-            DWORD negotiatedVersion;
-            TRY_OR_THROW(WlanOpenHandle, 2, nullptr, &negotiatedVersion, &this->handle);
-        }
-
-        ~wlan_session() {
-            // Cannot throw exceptions in a dtor.
-            WlanCloseHandle(this->handle, nullptr);
-        }
-
-        vector<WLAN_INTERFACE_INFO> get_interfaces() const {
-            PWLAN_INTERFACE_INFO_LIST interfaces;
-            TRY_OR_THROW(WlanEnumInterfaces, this->handle, nullptr, &interfaces);
-            
-            wlan_scope_guard<WLAN_INTERFACE_INFO_LIST> interfaces_guard(interfaces);
-
-            vector<WLAN_INTERFACE_INFO> out;
-
-            for (DWORD i = 0; i < interfaces->dwNumberOfItems; ++i) {
-                auto info = interfaces->InterfaceInfo[i];
-                if (info.isState != wlan_interface_state_not_ready) {
-                    out.push_back(info);
-                }
-            }
-
-            return out;
-        }
-
-        vector<wifi_survey::network> get_available_networks(GUID interfaceId) const {
-            timed_mutex scan_done;
-            scan_done.lock();
-
-            // register for "scan complete" notifications, then request a scan
-            TRY_OR_THROW(
-                WlanRegisterNotification,
-                this->handle,
-                WLAN_NOTIFICATION_SOURCE_ACM,
-                FALSE,
-                wlan_session_notify_callback,
-                &scan_done, 
-                nullptr,
-                nullptr);
-
-            TRY_OR_THROW(WlanScan, this->handle, &interfaceId, nullptr, nullptr, nullptr);
-
-            // callback will unlock the mutex.
-            // Scan is required to complete in 4s, per spec, and I don't feel like trying to get fancier.
-            if (!scan_done.try_lock_for(5s)) {
-                throw new runtime_error("Scan for wireless networks failed to complete in 5s.");
-            }
-
-            // unregister notifications
-            TRY_OR_THROW(
-                WlanRegisterNotification, 
-                this->handle, 
-                WLAN_NOTIFICATION_SOURCE_NONE, 
-                FALSE, 
-                nullptr, 
-                nullptr, 
-                nullptr, 
-                nullptr);
-
-            PWLAN_BSS_LIST bss_list;
-            TRY_OR_THROW(
-                WlanGetNetworkBssList,
-                this->handle,
-                &interfaceId,
-                nullptr,
-                dot11_BSS_type_any,
-                FALSE,
-                nullptr,
-                &bss_list);
-            wlan_scope_guard<WLAN_BSS_LIST> bss_list_guard(bss_list);
-
-            vector<wifi_survey::network> result;
-            for (DWORD i = 0; i < bss_list->dwNumberOfItems; ++i) {
-                auto item = bss_list->wlanBssEntries[i];
-                std::string ssid(item.dot11Ssid.ucSSID, item.dot11Ssid.ucSSID + item.dot11Ssid.uSSIDLength);
-
-                wifi_survey::network n{ ssid, item.ulChCenterFrequency, item.lRssi };
-                result.push_back(n);
-            }
-
-            return result;
-        }
-
-    private:
-        HANDLE handle;
-    };
-
+    // tediously ripped from wikipedia
     wifi_survey::frequency_channel_map maps[] = {
         { 1, 2412 },
         { 2, 2417 },
@@ -176,14 +67,113 @@ namespace {
 }
 
 namespace wifi_survey {
-    vector<network> enumerate_networks() {
-        wlan_session session{};
+    VOID WINAPI wlan_session_notify_callback(PWLAN_NOTIFICATION_DATA data, PVOID context) {
+        auto scan_done = (timed_mutex*)context;
+        if (data->NotificationSource == WLAN_NOTIFICATION_SOURCE_ACM &&
+            data->NotificationCode == wlan_notification_acm_scan_complete) {
+            scan_done->unlock();
+        }
+    }
 
-        auto device = session.get_interfaces().front();
+    template<typename T>
+    class wlan_scope_guard {
+        unique_ptr<T, void(*)(T*)> ptr;
 
-        auto networks = session.get_available_networks(device.InterfaceGuid);
+    public:
+        wlan_scope_guard(T* t) : ptr(t, [](T* t2) { WlanFreeMemory(t2); }) { }
+    };
 
-        return networks;
+    // Initializes a new "session" of dealing with the windows wireless API.
+    wlan_session::wlan_session() {
+        DWORD negotiatedVersion;
+        TRY_OR_THROW(WlanOpenHandle, 2, nullptr, &negotiatedVersion, &this->handle);
+    }
+
+    wlan_session::~wlan_session() {
+        // Cannot throw exceptions in a dtor.
+        WlanCloseHandle(this->handle, nullptr);
+    }
+
+    vector<wifi_survey::adapter> wlan_session::enumerate_adapters() const {
+        PWLAN_INTERFACE_INFO_LIST interfaces;
+        TRY_OR_THROW(WlanEnumInterfaces, this->handle, nullptr, &interfaces);
+
+        wlan_scope_guard<WLAN_INTERFACE_INFO_LIST> interfaces_guard(interfaces);
+
+        vector<wifi_survey::adapter> out;
+
+        for (DWORD i = 0; i < interfaces->dwNumberOfItems; ++i) {
+            auto info = interfaces->InterfaceInfo[i];
+            if (info.isState != wlan_interface_state_not_ready) {
+                wstring interface_description(info.strInterfaceDescription);
+                string interface_description_str(begin(interface_description), end(interface_description));
+                out.push_back(wifi_survey::adapter{ interface_description_str, info.InterfaceGuid });
+            }
+        }
+
+        return out;
+    }
+
+    vector<network> wlan_session::enumerate_networks(adapter adapter) const {
+        this->scan_networks_blocking(adapter);
+
+        PWLAN_BSS_LIST bss_list;
+        TRY_OR_THROW(
+            WlanGetNetworkBssList,
+            this->handle,
+            &adapter.GUID,
+            nullptr,
+            dot11_BSS_type_any,
+            FALSE,
+            nullptr,
+            &bss_list);
+        wlan_scope_guard<WLAN_BSS_LIST> bss_list_guard(bss_list);
+
+        vector<wifi_survey::network> result;
+        for (DWORD i = 0; i < bss_list->dwNumberOfItems; ++i) {
+            auto item = bss_list->wlanBssEntries[i];
+            std::string ssid(item.dot11Ssid.ucSSID, item.dot11Ssid.ucSSID + item.dot11Ssid.uSSIDLength);
+
+            wifi_survey::network n{ ssid, item.ulChCenterFrequency, item.lRssi };
+            result.push_back(n);
+        }
+
+        return result;
+    }
+
+    void wlan_session::scan_networks_blocking(adapter adapter) const {
+        timed_mutex scan_done;
+        scan_done.lock();
+
+        // register for "scan complete" notifications, then request a scan
+        TRY_OR_THROW(
+            WlanRegisterNotification,
+            this->handle,
+            WLAN_NOTIFICATION_SOURCE_ACM,
+            FALSE,
+            wlan_session_notify_callback,
+            &scan_done,
+            nullptr,
+            nullptr);
+
+        TRY_OR_THROW(WlanScan, this->handle, &adapter.GUID, nullptr, nullptr, nullptr);
+
+        // callback will unlock the mutex.
+        // Scan is required to complete in 4s, per spec, and I don't feel like trying to get fancier.
+        if (!scan_done.try_lock_for(5s)) {
+            throw new runtime_error("Scan for wireless networks failed to complete in 5s.");
+        }
+
+        // unregister notifications
+        TRY_OR_THROW(
+            WlanRegisterNotification,
+            this->handle,
+            WLAN_NOTIFICATION_SOURCE_NONE,
+            FALSE,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr);
     }
     
     frequency_channel_map get_frequency_channel_map(unsigned long frequency_khz) {
