@@ -14,11 +14,12 @@ struct table_row {
 
 // Tabular output and whatnot
 struct table {
+    // ex: table t{ "Name", "Height", "Weight" };
     table(initializer_list<string> headings) {
         contents.push_back(headings);
     }
 
-    // ex.: table.add({ "foo", "bar", "baz" })
+    // ex.: table.add({ "Jim", "6'0\"", "185lbs" });
     void add(table_row row) {
         contents.push_back(row.contents);
     }
@@ -28,21 +29,28 @@ private:
     friend ostream& operator<<(ostream& out, const table& table);
 };
 
-// Makes the table go cout << table and work its glorious magic
-ostream& operator<<(ostream& out, const table& table) {
+vector<size_t> get_column_lengths(const vector<vector<string>>& contents) {
     vector<size_t> column_lengths;
-    for (size_t i = 0; i < table.contents[0].size(); ++i) {
-        size_t max_length = 0;
-        for (const auto& row : table.contents) {
-            max_length = max(max_length, row.at(i).length());
-        }
 
+    for (size_t i = 0; i < contents[0].size(); ++i) {
+        auto longest = max_element(begin(contents), end(contents), [=](const auto& a, const auto& b) {
+            return a.at(i).length() < b.at(i).length();
+        });
+
+        size_t max_length = longest->at(i).length();
         column_lengths.push_back(max_length);
     }
 
+    return column_lengths;
+}
+
+// Makes the table go cout << table and work its glorious magic
+ostream& operator<<(ostream& out, const table& table) {
+    auto column_lengths = get_column_lengths(table.contents);
+
     for (const auto& row : table.contents) {
         for (size_t i = 0; i < column_lengths.size(); ++i) {
-            out << left  << setw(column_lengths[i] + 2) << row[i];
+            out << left << setw(column_lengths[i] + 2) << row[i];
         }
 
         out << '\n';
@@ -56,15 +64,28 @@ ostream& operator<<(ostream& out, const table& table) {
 void run() {
     wifi_survey::wlan_session session;
     auto adapters = session.enumerate_adapters();
-    cout << "Adapters (TODO: don't just pick the first):\n";
+    cout << "Adapters:\n";
+
+    int adapterIndex = 0;
     for (auto adapter : adapters) {
-        cout << adapter.name << '\n';
+        cout << adapterIndex++ << '\t' << adapter.name << '\n';
     }
 
-    auto chosen_adapter = adapters.front();
+    if (adapters.size() > 1) {
+        while (adapterIndex < 0 || adapterIndex >= adapters.size()) {
+            cout << "Enter the number of the adapter to scan on: ";
+            cin >> adapterIndex;
+        }
+    }
+    else {
+        cout << "Only one adapter.  Scanning.\n";
+        adapterIndex = 0;
+    }
+
+    auto chosen_adapter = adapters[adapterIndex];
     auto networks = session.enumerate_networks(chosen_adapter);
 
-    sort(networks.begin(), networks.end(), [](const wifi_survey::network& a, const wifi_survey::network& b) {
+    sort(begin(networks), end(networks), [](const auto& a, const auto& b) {
         if (a.frequency == b.frequency) {
             if (a.strength == b.strength) {
                 return a.name < b.name;
@@ -78,7 +99,6 @@ void run() {
 
     table out{ "band", "channel", "strength", "SSID" };
 
-    unsigned long last_freq = 0;
     for (const auto& network : networks) {
         auto map = wifi_survey::get_frequency_channel_map(network.frequency);
         out.add({ map.band, to_string(map.channel), to_string(network.strength) + "dBm", network.name });
